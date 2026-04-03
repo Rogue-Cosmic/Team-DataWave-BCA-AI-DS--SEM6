@@ -7,3 +7,14 @@ nltk
 selenium
 Flask
 Flask-Cors
+joblib
+pickle-mixin
+regex
+beautifulsoup4
+lxml
+matplotlib
+seaborn
+gunicorn
+webdriver-manager
+requests
+tqdm
