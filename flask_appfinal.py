@@ -239,21 +239,6 @@ def analyze_url():
     })
 
 
-@app.route('/api/analyze/text', methods=['POST'])
-def analyze_text():
-    data = request.get_json(silent=True) or {}
-    review = data.get("review", "").strip()
-
-    if not review:
-        return jsonify({"error": "Review text is required"}), 400
-
-    results, _ = score_reviews([review])
-    if not results:
-        return jsonify({"error": "Unable to analyze review"}), 500
-
-    return jsonify(results[0])
-
-
 @app.route('/api/insights', methods=['GET'])
 def get_insights():
     try:
