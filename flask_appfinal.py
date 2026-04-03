@@ -1,0 +1,252 @@
+import flask
+from flask import Flask, request, jsonify, render_template
+import pickle
+import numpy as np
+import scipy.sparse as sp
+import re
+import time
+import pandas as pd
+import nltk
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+import os
+from flask_cors import CORS
+
+app = Flask(__name__)
+CORS(app)
+
+# --- NLTK setup ---
+for resource in [('sentiment/vader_lexicon.zip', 'vader_lexicon'),
+                 ('corpora/stopwords', 'stopwords'),
+                 ('corpora/wordnet', 'wordnet')]:
+    try:
+        nltk.data.find(resource[0])
+    except LookupError:
+        nltk.download(resource[1], quiet=True)
+
+# --- Load models ---
+try:
+    vectorizer = pickle.load(open("tfidf_vectorizer.pkl", "rb"))
+    model = pickle.load(open("isolation_forest_yelp.pkl", "rb"))
+    print("Models loaded successfully.")
+except Exception as e:
+    print(f"Error loading models: {e}")
+
+
+def create_driver():
+    """
+    Exact same driver setup as live_yelp_analysis.ipynb.
+    On Render (Linux): runs headless with system chromium.
+    On Windows/Mac (local): runs visibly — no headless, avoids Yelp bot detection.
+    """
+    import platform
+    import os
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+
+    chrome_options = Options()
+    is_linux = platform.system() == "Linux"
+
+    if is_linux:
+        # Render server — no display, must use headless
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--window-size=1920,1080")
+        for binary in ["/usr/bin/chromium-browser", "/usr/bin/chromium"]:
+            if os.path.exists(binary):
+                chrome_options.binary_location = binary
+                break
+    else:
+        # Windows / Mac — NO headless (same as notebook, avoids bot detection)
+        chrome_options.add_argument("--start-maximized")
+
+    # Anti-detection flags (identical to notebook)
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option("useAutomationExtension", False)
+
+    if is_linux:
+        try:
+            driver = webdriver.Chrome(
+                service=Service("/usr/bin/chromedriver"),
+                options=chrome_options
+            )
+        except Exception:
+            from webdriver_manager.chrome import ChromeDriverManager
+            driver = webdriver.Chrome(
+                service=Service(ChromeDriverManager().install()),
+                options=chrome_options
+            )
+    else:
+        from webdriver_manager.chrome import ChromeDriverManager
+        driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=chrome_options
+        )
+
+    # Remove selenium fingerprint (identical to notebook)
+    driver.execute_script(
+        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+    )
+    return driver
+
+
+def fetch_yelp_reviews(url):
+    """
+    Exact same scraping logic as live_yelp_analysis.ipynb.
+    """
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    driver = create_driver()
+    reviews = []
+
+    try:
+        driver.get(url)
+
+        wait = WebDriverWait(driver, 20)
+        wait.until(EC.presence_of_element_located((By.TAG_NAME, "p")))
+
+        for _ in range(5):
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(2)
+
+        elements = driver.find_elements(By.TAG_NAME, "p")
+        for el in elements:
+            text = el.text.strip()
+            if len(text) > 80:
+                reviews.append(text)
+    finally:
+        driver.quit()
+
+    return reviews
+
+
+def explain_anomaly(review_text, decision_score, sentiment_score):
+    reasons = []
+    word_count = len(review_text.split())
+    if word_count < 10:
+        reasons.append("Unusually short review length, a common trait of bot-generated spam.")
+    elif word_count > 300:
+        reasons.append("Unusually long review length compared to typical bounds.")
+    if sentiment_score > 0.9:
+        reasons.append(
+            f"Extreme positive polarization (Score: {sentiment_score:.2f}). "
+            "Fake reviews are often wildly exaggerated."
+        )
+    elif sentiment_score < -0.9:
+        reasons.append(
+            f"Extreme negative polarization (Score: {sentiment_score:.2f}). "
+            "Fake reviews often show heavy exaggeration."
+        )
+    upper_chars = sum(1 for c in review_text if c.isupper())
+    if len(review_text) > 0 and (upper_chars / len(review_text)) > 0.2:
+        reasons.append("Excessive use of capital letters (>20%), common in promotional/spam content.")
+    if review_text.count('!') > 4:
+        reasons.append("Excessive use of exclamation marks detected.")
+    if not reasons:
+        reasons.append("Subtle statistical mismatch in terminology or structural density against normal baseline.")
+    return reasons
+
+
+def get_sentiment(text):
+    sid = SentimentIntensityAnalyzer()
+    return sid.polarity_scores(text)['compound']
+
+
+@app.route('/')
+def home():
+    return render_template('index.html')
+
+
+@app.route('/api/analyze/url', methods=['POST'])
+def analyze_url():
+    data = request.json
+    url = data.get("url", "")
+
+    if "yelp.com" not in url.lower():
+        return jsonify({"error": "Invalid Yelp URL"}), 400
+
+    try:
+        raw_reviews = fetch_yelp_reviews(url)
+    except Exception as e:
+        return jsonify({"error": f"Scraping failed: {str(e)}"}), 500
+
+    if not raw_reviews:
+        return jsonify({"error": "No reviews extracted. Yelp may have blocked the request."}), 404
+
+    # --- Preprocess ---
+    from nltk.corpus import stopwords
+    from nltk.stem import WordNetLemmatizer
+
+    stop_words = set(stopwords.words('english'))
+    lemmatizer = WordNetLemmatizer()
+
+    clean_docs = []
+    for r in raw_reviews:
+        text = r.lower()
+        text = re.sub(r"http\S+", "", text)
+        text = re.sub(r"[^a-z\s]", "", text)
+        tokens = text.split()
+        cleaned_tokens = [lemmatizer.lemmatize(w) for w in tokens if w not in stop_words]
+        clean_docs.append(" ".join(cleaned_tokens))
+
+    # --- Features (must match training) ---
+    X_text = vectorizer.transform(clean_docs)
+    review_lengths = [[len(r.split())] for r in clean_docs]
+    rating_placeholders = [[3] for _ in clean_docs]
+    X_live = sp.hstack([X_text, review_lengths, rating_placeholders])
+
+    # --- Predict ---
+    predictions = model.predict(X_live)
+    d_scores = model.decision_function(X_live)
+
+    suspicious_count = 0
+    results = []
+    for review, pred, d_score in zip(raw_reviews, predictions, d_scores):
+        s_score = get_sentiment(review)
+        is_fake = bool(pred == -1)
+        if is_fake:
+            suspicious_count += 1
+        reasons = explain_anomaly(review, d_score, s_score) if is_fake else []
+        results.append({
+            "text": review,
+            "is_fake": is_fake,
+            "sentiment_score": float(s_score),
+            "anomaly_score": float(d_score),
+            "reasons": reasons
+        })
+
+    susp_percentage = (suspicious_count / len(results)) * 100 if results else 0
+
+    return jsonify({
+        "total_reviews": len(results),
+        "suspicious_percentage": susp_percentage,
+        "reviews": results
+    })
+
+
+@app.route('/api/insights', methods=['GET'])
+def get_insights():
+    try:
+        df = pd.read_csv("yelp_reviews_clean.csv")
+        avg_rating = float(df['rating'].mean())
+        avg_words = float(df['review_length'].mean())
+        rating_counts = df['rating'].value_counts().sort_index().to_dict()
+
+        return jsonify({
+            "total_reviews": len(df),
+            "average_rating": avg_rating,
+            "average_word_count": avg_words,
+            "rating_distribution": {str(k): int(v) for k, v in rating_counts.items()}
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
