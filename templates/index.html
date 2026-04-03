@@ -55,23 +55,7 @@
                 <h2 class="section-title">Analyze <span class="gradient-text">Reviews</span></h2>
                 
                 <div class="glass-panel form-panel">
-                    <div class="tabs">
-                        <button class="tab-btn active" data-tab="single-tab">Single Text</button>
-                        <button class="tab-btn" data-tab="url-tab">Business URL</button>
-                    </div>
-
-                    <!-- Single Text Form -->
-                    <div id="single-tab" class="tab-content active">
-                        <div class="input-group">
-                            <label>Enter a Review Content</label>
-                            <textarea id="single-review-input" rows="4" placeholder="Type or paste review here..."></textarea>
-                        </div>
-                        <button id="analyze-single-btn" class="primary-btn">Analyze Text</button>
-                        <div id="single-result-container" class="result-container hidden glass-panel-inner"></div>
-                    </div>
-
-                    <!-- URL Form -->
-                    <div id="url-tab" class="tab-content hidden">
+                    <div class="tab-content active" id="url-tab">
                         <div class="input-group">
                             <label>Yelp Business URL</label>
                             <input type="text" id="url-input" placeholder="https://www.yelp.com/biz/...">
