@@ -21,62 +21,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    // Tabs logic
-    const tabBtns = document.querySelectorAll('.tab-btn');
-    const tabContents = document.querySelectorAll('.tab-content');
-    
-    tabBtns.forEach(btn => {
-        btn.addEventListener('click', () => {
-            tabBtns.forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            const target = btn.getAttribute('data-tab');
-            tabContents.forEach(c => c.classList.add('hidden'));
-            document.getElementById(target).classList.remove('hidden');
-        });
-    });
-
-    // Single Analysis
-    document.getElementById('analyze-single-btn').addEventListener('click', async () => {
-        const text = document.getElementById('single-review-input').value;
-        const resContainer = document.getElementById('single-result-container');
-        if (!text) return alert("Please enter review text");
-        
-        const btn = document.getElementById('analyze-single-btn');
-        btn.innerText = "Analyzing...";
-        
-        try {
-            const res = await fetch('/api/analyze/text', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({review: text})
-            });
-            const data = await res.json();
-            
-            resContainer.classList.remove('hidden');
-            let statusHtml = data.is_fake 
-                ? `<div class="status-danger">⚠️ Anomalous / Fake Review Detected</div>` 
-                : `<div class="status-success">✅ Genuine Review</div>`;
-                
-            let reasonHtml = '';
-            if (data.is_fake) {
-                reasonHtml = `<h5>Why Flagged?</h5><ul class="reasons">`;
-                data.reasons.forEach(r => reasonHtml += `<li>${r}</li>`);
-                reasonHtml += `</ul><p style="font-size:0.8rem; margin-top:5px; color:#94a3b8;">Strength: ${Math.abs(data.anomaly_score).toFixed(3)}</p>`;
-            }
-            
-            resContainer.innerHTML = `
-                ${statusHtml}
-                <p><strong>Sentiment Score:</strong> ${data.sentiment_score.toFixed(2)}</p>
-                ${reasonHtml}
-            `;
-            
-        } catch (e) {
-            alert("Error in analysis");
-        } finally {
-            btn.innerText = "Analyze Text";
-        }
-    });
-
     // URL Analysis
     let liveChartInstance = null;
     document.getElementById('analyze-url-btn').addEventListener('click', async () => {
